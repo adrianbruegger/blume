@@ -49,9 +49,37 @@ const FILTERS_SCHEMA = {
   type: "object",
 } as const;
 
+/** The optional locale filter `search_docs` and `list_pages` share. */
+const LOCALE_SCHEMA = {
+  description:
+    "Only include pages in this locale (e.g. `fr`). Omit for every language.",
+  type: "string",
+} as const;
+
+/** The optional docs-version scope `search_docs` and `list_pages` share. */
+const VERSION_SCHEMA = {
+  description:
+    'Docs version to scope to on a versioned site: `"latest"` (the default — current docs only), `"all"` (every version), or an archived version id (e.g. `"v1.0"`). Ignored when the site is unversioned.',
+  type: "string",
+} as const;
+
 /** JSON Schema for each tool's input, keyed by tool name. */
 const INPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
-  get_navigation: { properties: {}, type: "object" },
+  get_navigation: {
+    properties: {
+      locale: {
+        description:
+          "Locale whose navigation tree to return (defaults to the default locale).",
+        type: "string",
+      },
+      version: {
+        description:
+          "Archived version id whose tree to return (defaults to the current docs).",
+        type: "string",
+      },
+    },
+    type: "object",
+  },
   get_page: {
     properties: {
       route: {
@@ -66,6 +94,8 @@ const INPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
     properties: {
       contentTypes: CONTENT_TYPES_SCHEMA,
       filters: FILTERS_SCHEMA,
+      locale: LOCALE_SCHEMA,
+      version: VERSION_SCHEMA,
     },
     type: "object",
   },
@@ -79,7 +109,9 @@ const INPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
         minimum: 1,
         type: "integer",
       },
+      locale: LOCALE_SCHEMA,
       query: { description: "The search query.", type: "string" },
+      version: VERSION_SCHEMA,
     },
     required: ["query"],
     type: "object",
@@ -130,6 +162,33 @@ const matchesFacets = (
   filters: Record<string, string>
 ): boolean =>
   Object.entries(filters).every(([key, value]) => facets?.[key] === value);
+
+/** The optional `locale` filter, or `undefined` when absent/blank. */
+const asLocale = (value: unknown): string | undefined => {
+  const locale = typeof value === "string" ? value.trim() : "";
+  return locale || undefined;
+};
+
+/**
+ * Resolve the `version` scope on a versioned site: `undefined` disables the
+ * filter (`"all"`), `""` is the current docs (the default — agents almost
+ * always want the live documentation), and anything else is an archived id
+ * (an unknown id simply matches nothing). On an unversioned site the input is
+ * ignored entirely.
+ */
+const asVersionScope = (value: unknown, data: McpData): string | undefined => {
+  if (!data.archivedVersions) {
+    return;
+  }
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw === "all") {
+    return;
+  }
+  if (raw === "" || raw === "latest" || raw === "current") {
+    return "";
+  }
+  return raw;
+};
 
 const asLimit = (value: unknown): number => {
   const num = typeof value === "number" ? value : Number(value);
@@ -242,6 +301,8 @@ export const buildServer = (
         {
           contentTypes: asContentTypes(args.contentTypes),
           facets: asFacetFilters(args.filters),
+          locale: asLocale(args.locale),
+          version: asVersionScope(args.version, data),
         }
       );
       // `route` is the key `get_page` takes (the tool descriptions promise
@@ -253,6 +314,7 @@ export const buildServer = (
         route: doc.route,
         title: doc.title,
         url: urlFor(doc.route, data),
+        ...(data.archivedVersions ? { version: doc.version ?? "" } : {}),
       }));
       return text(JSON.stringify(results, null, 2));
     }
@@ -272,10 +334,14 @@ export const buildServer = (
     if (name === "list_pages") {
       const contentTypes = asContentTypes(args.contentTypes);
       const filters = asFacetFilters(args.filters);
+      const locale = asLocale(args.locale);
+      const versionScope = asVersionScope(args.version, data);
       const routes = data.routes.filter(
         (route) =>
           (!contentTypes || contentTypes.includes(route.contentType)) &&
-          (!filters || matchesFacets(route.facets, filters))
+          (!filters || matchesFacets(route.facets, filters)) &&
+          (!locale || route.locale === locale) &&
+          (versionScope === undefined || route.version === versionScope)
       );
       return text(
         JSON.stringify(
@@ -287,6 +353,7 @@ export const buildServer = (
             route: route.route,
             title: route.title,
             url: urlFor(route.route, data),
+            ...(data.archivedVersions ? { version: route.version } : {}),
           })),
           null,
           2
@@ -295,7 +362,26 @@ export const buildServer = (
     }
 
     if (name === "get_navigation") {
-      return text(JSON.stringify(data.navigation, null, 2));
+      // A version id selects the snapshot's tree; a locale selects its
+      // language (falling back through the default locale to any tree the
+      // snapshot has). Without a version, a locale selects the current docs'
+      // localized tree.
+      const locale = asLocale(args.locale);
+      const versionId = asLocale(args.version);
+      let { navigation } = data;
+      const byLocale = versionId
+        ? data.navigationByVersion?.[versionId]
+        : undefined;
+      if (byLocale) {
+        navigation =
+          (locale ? byLocale[locale] : undefined) ??
+          byLocale[data.defaultLocale ?? ""] ??
+          Object.values(byLocale)[0] ??
+          navigation;
+      } else if (locale && data.navigationByLocale?.[locale]) {
+        navigation = data.navigationByLocale[locale];
+      }
+      return text(JSON.stringify(navigation, null, 2));
     }
 
     return text(`Unknown tool: ${name}`, true);
