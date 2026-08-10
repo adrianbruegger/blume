@@ -261,7 +261,10 @@ export const scanProject = async (
     Promise.all(
       sources.map(async (source) => ({ source, ...(await source.load()) }))
     ),
-    discoverFolderMeta(metaSources, { localeDirs }),
+    discoverFolderMeta(metaSources, {
+      localeDirs,
+      versionDirs: config.versions?.archived.map((version) => version.id),
+    }),
   ]);
 
   const {
@@ -304,6 +307,7 @@ export const scanProject = async (
     i18n: config.i18n,
     navigation: config.navigation,
     sharedFolderMeta: folderMeta.shared,
+    versions: config.versions,
   });
   const manifest = buildManifest({ config, context, graph });
 

@@ -169,13 +169,15 @@ const applyFolderMeta = (
   group: MutableGroup,
   folderMeta: Map<string, FolderMeta>,
   sharedMeta: Map<string, FolderMeta>,
-  metaPrefix: string
+  metaPrefix: string,
+  sharedMetaPrefix: string
 ): void => {
   // Locale-specific meta wins; a shared `meta.$.*` (keyed by the locale-stripped
-  // group path) applies to every locale otherwise.
+  // group path — version-prefixed inside a snapshot) applies to every locale
+  // otherwise.
   const meta =
     folderMeta.get(metaKey(group.path, metaPrefix)) ??
-    sharedMeta.get(group.path);
+    sharedMeta.get(metaKey(group.path, sharedMetaPrefix));
   if (meta) {
     group.label = meta.title ?? group.label;
     group.icon = meta.icon ?? group.icon;
@@ -198,7 +200,13 @@ const applyFolderMeta = (
 
   for (const child of group.children) {
     if (child.kind === "group") {
-      applyFolderMeta(child, folderMeta, sharedMeta, metaPrefix);
+      applyFolderMeta(
+        child,
+        folderMeta,
+        sharedMeta,
+        metaPrefix,
+        sharedMetaPrefix
+      );
     }
   }
 };
@@ -229,14 +237,15 @@ const indexTitleMismatchDiagnostic = (
   folderPath: string,
   folderMeta: Map<string, FolderMeta>,
   sharedMeta: Map<string, FolderMeta>,
-  metaPrefix: string
+  metaPrefix: string,
+  sharedMetaPrefix: string
 ): Diagnostic | undefined => {
   if (!page.meta.title || page.fallback || folderPath === "") {
     return undefined;
   }
   const meta =
     folderMeta.get(metaKey(folderPath, metaPrefix)) ??
-    sharedMeta.get(folderPath);
+    sharedMeta.get(metaKey(folderPath, sharedMetaPrefix));
   if (!meta?.title || meta.title === page.title) {
     return undefined;
   }
@@ -388,6 +397,7 @@ const buildFileSystemSidebar = (
   folderMeta: Map<string, FolderMeta>,
   sharedMeta: Map<string, FolderMeta>,
   metaPrefix: string,
+  sharedMetaPrefix: string,
   display: SidebarDisplay,
   tabPaths: Set<string>,
   diagnostics: Diagnostic[] = []
@@ -409,7 +419,8 @@ const buildFileSystemSidebar = (
         dirs.join("/"),
         folderMeta,
         sharedMeta,
-        metaPrefix
+        metaPrefix,
+        sharedMetaPrefix
       );
       if (diagnostic) {
         diagnostics.push(diagnostic);
@@ -461,7 +472,7 @@ const buildFileSystemSidebar = (
     });
   }
 
-  applyFolderMeta(root, folderMeta, sharedMeta, metaPrefix);
+  applyFolderMeta(root, folderMeta, sharedMeta, metaPrefix, sharedMetaPrefix);
   sortNodes(root.children, diagnostics);
   hoistPages(root.children, display === "flat");
   hoistTabSections(root.children, tabPaths, display === "flat");
@@ -626,6 +637,53 @@ const withTabHrefs = (tabs: NavTab[], sidebar: NavNode[]): NavTab[] =>
     return href === tab.path ? tab : { ...tab, href };
   });
 
+/**
+ * Rebase config-provided nav chrome (featured links, selectors, tabs) under the
+ * site base path. Config paths are authored as if mounted at root, so the base
+ * is applied here (idempotently, and only to internal paths — external URLs
+ * pass through). With no base this is a pure pass-through — the arrays keep
+ * their exact authored shape.
+ */
+const rebaseNavChrome = (
+  basePath: string,
+  options: {
+    featured?: FeaturedLink[];
+    selectors?: NavSelector[];
+    tabs?: NavTab[];
+  }
+): {
+  featured: FeaturedLink[];
+  selectors: NavSelector[];
+  tabs: NavTab[];
+} => {
+  const featured = options.featured ?? [];
+  const selectors = options.selectors ?? [];
+  const tabs = options.tabs ?? [];
+  if (!basePath) {
+    return { featured, selectors, tabs };
+  }
+  const rebasePath = <T extends { path: string }>(item: T): T => ({
+    ...item,
+    path: withBasePath(basePath, item.path),
+  });
+  return {
+    featured: featured.map((link) => ({
+      ...link,
+      href: withBasePath(basePath, link.href),
+    })),
+    selectors: selectors.map((selector) => ({
+      ...selector,
+      items: selector.items.map(rebasePath),
+    })),
+    tabs: tabs.map((tab) => ({
+      ...tab,
+      ...(tab.href ? { href: withBasePath(basePath, tab.href) } : {}),
+      items: tab.items?.map(rebasePath),
+      path: withBasePath(basePath, tab.path),
+    })),
+  };
+};
+
 /** Build the complete navigation model from pages, meta, and config. */
 export const buildNavigation = (
   pages: PageRecord[],
@@ -639,8 +697,18 @@ export const buildNavigation = (
     selectors?: NavSelector[];
     tabs?: NavTab[];
     sidebar?: SidebarItemConfig[];
-    /** Locale dir prefix for folder-meta lookup (`""` for the default locale). */
+    /**
+     * Folder-meta lookup prefix (`""` for the default locale of the current
+     * version): the version dir and/or locale dir hoisted in front of the
+     * group path, e.g. `fr`, `v1.0`, or `v1.0/fr`.
+     */
     metaPrefix?: string;
+    /**
+     * Prefix for shared `meta.$.*` lookups — the version dir inside a
+     * snapshot (`v1.0`), since shared meta is locale-agnostic but still
+     * version-specific. `""` for the current version.
+     */
+    sharedMetaPrefix?: string;
     /**
      * Resolve explicit-sidebar references against each page's locale-agnostic
      * `translationKey` instead of its localized `route`. Used under i18n so a
@@ -667,38 +735,13 @@ export const buildNavigation = (
   const basePath = options.basePath ?? "";
   const display = options.display ?? "flat";
   const metaPrefix = options.metaPrefix ?? "";
+  const sharedMetaPrefix = options.sharedMetaPrefix ?? "";
   const sharedFolderMeta = options.sharedFolderMeta ?? new Map();
 
-  // Config-provided nav paths are authored as if mounted at root, so the base
-  // is applied here (idempotently, and only to internal paths — external URLs
-  // pass through). Content-derived sidebar routes are already based via
-  // `page.route`. The based tab paths also feed tab-scoping below, so they must
-  // agree with the based content routes. With no base, this is a pure pass-
-  // through — the arrays keep their exact authored shape.
-  const rebasePath = <T extends { path: string }>(item: T): T => ({
-    ...item,
-    path: withBasePath(basePath, item.path),
-  });
-  const featured = basePath
-    ? (options.featured ?? []).map((link) => ({
-        ...link,
-        href: withBasePath(basePath, link.href),
-      }))
-    : (options.featured ?? []);
-  const selectors = basePath
-    ? (options.selectors ?? []).map((selector) => ({
-        ...selector,
-        items: selector.items.map(rebasePath),
-      }))
-    : (options.selectors ?? []);
-  const tabs = basePath
-    ? (options.tabs ?? []).map((tab) => ({
-        ...tab,
-        ...(tab.href ? { href: withBasePath(basePath, tab.href) } : {}),
-        items: tab.items?.map(rebasePath),
-        path: withBasePath(basePath, tab.path),
-      }))
-    : (options.tabs ?? []);
+  // Content-derived sidebar routes are already based via `page.route`; the
+  // based tab paths also feed tab-scoping below, so they must agree with the
+  // based content routes.
+  const { featured, selectors, tabs } = rebaseNavChrome(basePath, options);
   const byRoute = new Map(
     pages.map((page) => [
       options.refByLogical ? page.translationKey : page.route,
@@ -748,6 +791,7 @@ export const buildNavigation = (
     options.folderMeta,
     sharedFolderMeta,
     metaPrefix,
+    sharedMetaPrefix,
     display,
     new Set(
       tabs.flatMap((tab) => (tab.path === rootTabPath ? [] : [tab.path]))
