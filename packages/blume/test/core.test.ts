@@ -46,6 +46,8 @@ const makePage = (
   source: { name: "filesystem", ref: over.id },
   sourcePath: `/abs/${over.id}`,
   translationKey: over.route,
+  version: "",
+  versionKey: over.route,
   ...over,
 });
 

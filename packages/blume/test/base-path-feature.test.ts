@@ -301,6 +301,8 @@ const makePage = (
   sourcePath: `/abs/${navPath}.mdx`,
   title: route,
   translationKey: navPath,
+  version: "",
+  versionKey: navPath,
 });
 
 const makeGraph = (pages: PageRecord[]): ContentGraph =>
