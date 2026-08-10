@@ -1211,6 +1211,7 @@ export const buildRuntimeData = (project: BlumeProject): string => {
       theme: config.theme,
       title: config.title,
       toc: config.toc,
+      versions: config.versions ?? null,
       webmcp: {
         enabled: config.ai.webmcp,
         llms: config.ai.llmsTxt.enabled,
@@ -1227,6 +1228,19 @@ export const buildRuntimeData = (project: BlumeProject): string => {
     navigation: withRepoUrl(graph.navigation),
     // Per-locale navigation; the catch-all selects the active locale's tree.
     navigationByLocale,
+    // Per-archived-version navigation; the catch-all selects by the route's
+    // version, then locale.
+    navigationByVersion: Object.fromEntries(
+      Object.entries(graph.navigationByVersion).map(([id, byLocale]) => [
+        id,
+        Object.fromEntries(
+          Object.entries(byLocale).map(([code, nav]) => [
+            code,
+            withRepoUrl(nav),
+          ])
+        ),
+      ])
+    ),
     routes: manifest.routes.map((route) => ({
       alternates: route.alternates,
       collection: route.collection,
@@ -1241,6 +1255,8 @@ export const buildRuntimeData = (project: BlumeProject): string => {
       locale: route.locale,
       path: route.path,
       title: route.title,
+      version: route.version,
+      versionAlternates: route.versionAlternates,
     })),
     // Default-locale chrome strings (English baseline when not under i18n).
     ui: defaultUi,
